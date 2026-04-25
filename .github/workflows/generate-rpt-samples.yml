@@ -202,7 +202,7 @@ jobs:
           Add-Type -Path $engineDll
           if ($sharedDll) { Add-Type -Path $sharedDll }
 
-          # Mevcut bir public RPT'yi şablon olarak indir
+          # Download a public RPT to use as template
           $templateUrl = "https://raw.githubusercontent.com/majorsilence/CrystalCmd/master/thereport.rpt"
           $template = "$PWD\template.rpt"
           Invoke-WebRequest -Uri $templateUrl -OutFile $template
@@ -222,7 +222,7 @@ jobs:
                               $textObj.Text = $NewText
                               $modified++
                           } elseif ($obj.Kind.ToString() -eq "FieldObject") {
-                              # FieldObject — pas (alan tipi tutmayabilir)
+                              # FieldObject - skip (type may not match)
                           }
                       } catch {
                           Write-Host "  Skipped object: $($_.Exception.Message)"
@@ -233,7 +233,7 @@ jobs:
               $doc.SaveAs($Output)
               $doc.Close()
               if (Test-Path $Output) {
-                  Write-Host "✓ Saved: $Output ($((Get-Item $Output).Length) bytes)"
+                  Write-Host "[OK] Saved: $Output ($((Get-Item $Output).Length) bytes)"
               }
           }
 
@@ -241,9 +241,9 @@ jobs:
               Modify-ReportText -Output "$PWD\output\modified-v1.rpt" -NewText "AAAAAAAA"
               Modify-ReportText -Output "$PWD\output\modified-v2.rpt" -NewText "BBBBBBBB"
               Modify-ReportText -Output "$PWD\output\modified-v3.rpt" -NewText "CCCCCCCC"
-              # Aynı template'i değişmeden de kaydet (kontrol için)
+              # Save the unchanged template too (control sample)
               Copy-Item $template "$PWD\output\template-asis.rpt"
-              Write-Host "✓ All samples ready"
+              Write-Host "[OK] All samples ready"
           } catch {
               Write-Host "::error::Modification failed: $_"
               Write-Host $_.ScriptStackTrace
