@@ -38,25 +38,30 @@ jobs:
         run: |
           choco search crystal --by-id-only 2>&1 | Select-Object -First 20
 
-      - name: Try installing Crystal Reports Runtime via Chocolatey
+      - name: Install Crystal Reports Runtime via Chocolatey (correct package IDs)
         shell: pwsh
         continue-on-error: true
         id: choco_install
         run: |
-          # Try several known Chocolatey package IDs
-          $packages = @("crystalreports", "crystalreports2008", "crystalreports-runtime", "sap-crystal-reports-for-vs")
+          # Doğru paket adları (choco search ile bulundu):
+          #   CrystalReports2010Runtime 13.0.36      ← ana hedef (CR 13, modern)
+          #   CrystalReports2008Runtime 12.4.1       ← yedek (eski sürüm)
+          #   crystalreports-for-visualstudio 13.0.34 ← VS entegrasyonu
+          $packages = @("CrystalReports2010Runtime", "crystalreports-for-visualstudio", "CrystalReports2008Runtime")
           $installed = $false
           foreach ($pkg in $packages) {
-            Write-Host "Attempting: choco install $pkg"
-            choco install $pkg -y --no-progress --ignore-checksums 2>&1 | Out-String | Write-Host
+            Write-Host "=== Attempting: choco install $pkg ==="
+            choco install $pkg -y --no-progress --ignore-checksums --force 2>&1 | Out-String | Write-Host
             if ($LASTEXITCODE -eq 0) {
               Write-Host "✓ Installed: $pkg"
               $installed = $true
-              break
+              # Birden fazla paket dene (32-bit + 64-bit), continue
+            } else {
+              Write-Host "✗ Failed: $pkg (exit $LASTEXITCODE)"
             }
           }
           if (-not $installed) {
-            Write-Host "::warning::No Chocolatey CR package succeeded — will try NuGet next"
+            Write-Host "::warning::No Chocolatey CR package succeeded"
           }
 
       - name: Try downloading Crystal Reports Runtime MSI directly
