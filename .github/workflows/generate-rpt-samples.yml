@@ -126,60 +126,70 @@ jobs:
             Write-Host "::warning::Cannot proceed with PowerShell report generation"
           }
 
-      - name: Create RPT samples (only if CR DLLs are available)
+      - name: Modify-and-save existing RPT (Engine API — daha güvenilir)
         shell: pwsh
         continue-on-error: true
         run: |
           $dllList = "$env:GITHUB_WORKSPACE\crystal-dll-paths.txt"
           if (-not (Test-Path $dllList)) {
-            Write-Host "::warning::No CR DLLs available — skipping RPT generation"
+            Write-Host "::warning::No CR DLLs available"
             exit 0
           }
           $dlls = Get-Content $dllList
           $engineDll = $dlls | Where-Object { $_ -like "*CrystalDecisions.CrystalReports.Engine*" } | Select-Object -First 1
-          $clientDocDll = $dlls | Where-Object { $_ -like "*CrystalDecisions.ReportAppServer.ClientDoc*" } | Select-Object -First 1
-          $reportDefDll = $dlls | Where-Object { $_ -like "*CrystalDecisions.ReportAppServer.ReportDefModel*" } | Select-Object -First 1
-
-          if (-not $engineDll -or -not $clientDocDll) {
-            Write-Host "::error::Required Crystal DLLs missing"
+          $sharedDll = $dlls | Where-Object { $_ -like "*CrystalDecisions.Shared*" } | Select-Object -First 1
+          if (-not $engineDll) {
+            Write-Host "::error::CrystalDecisions.CrystalReports.Engine.dll missing"
             exit 1
           }
-
           Write-Host "Loading: $engineDll"
           Add-Type -Path $engineDll
-          Write-Host "Loading: $clientDocDll"
-          Add-Type -Path $clientDocDll
-          if ($reportDefDll) {
-            Write-Host "Loading: $reportDefDll"
-            Add-Type -Path $reportDefDll
-          }
+          if ($sharedDll) { Add-Type -Path $sharedDll }
 
-          function New-MinimalReport {
-              param([string]$Path, [string]$TextContent, [bool]$Italic = $false)
-              $doc = New-Object CrystalDecisions.ReportAppServer.ClientDoc.ReportClientDocument
-              $doc.New()
-              $textObj = New-Object CrystalDecisions.ReportAppServer.ReportDefModel.TextObject
-              $textObj.Text = $TextContent
-              $textObj.Left = 100
-              $textObj.Top = 100
-              $textObj.Width = 2000
-              $textObj.Height = 200
-              $detailsArea = $doc.ReportDefController.ReportDefinition.Areas | Where-Object { $_.Name -eq "Detail" } | Select-Object -First 1
-              if (-not $detailsArea) { $detailsArea = $doc.ReportDefController.ReportDefinition.Areas[3] }
-              $detailsSection = $detailsArea.Sections[0]
-              $doc.ReportDefController.ReportObjectController.Add($textObj, $detailsSection, -1)
-              $doc.SaveAs($Path, $null, 0)
+          # Mevcut bir public RPT'yi şablon olarak indir
+          $templateUrl = "https://raw.githubusercontent.com/majorsilence/CrystalCmd/master/thereport.rpt"
+          $template = "$PWD\template.rpt"
+          Invoke-WebRequest -Uri $templateUrl -OutFile $template
+          Write-Host "Template downloaded: $((Get-Item $template).Length) bytes"
+
+          function Modify-ReportText {
+              param([string]$Output, [string]$NewText)
+              $doc = New-Object CrystalDecisions.CrystalReports.Engine.ReportDocument
+              $doc.Load($template)
+              $modified = 0
+              foreach ($section in $doc.ReportDefinition.Sections) {
+                  foreach ($obj in $section.ReportObjects) {
+                      try {
+                          if ($obj.Kind.ToString() -eq "TextObject") {
+                              $textObj = [CrystalDecisions.CrystalReports.Engine.TextObject]$obj
+                              Write-Host "  Modifying text: '$($textObj.Text)' -> '$NewText'"
+                              $textObj.Text = $NewText
+                              $modified++
+                          } elseif ($obj.Kind.ToString() -eq "FieldObject") {
+                              # FieldObject — pas (alan tipi tutmayabilir)
+                          }
+                      } catch {
+                          Write-Host "  Skipped object: $($_.Exception.Message)"
+                      }
+                  }
+              }
+              Write-Host "Modified $modified objects in $Output"
+              $doc.SaveAs($Output)
               $doc.Close()
-              Write-Host "  Created: $Path ($((Get-Item $Path).Length) bytes)"
+              if (Test-Path $Output) {
+                  Write-Host "✓ Saved: $Output ($((Get-Item $Output).Length) bytes)"
+              }
           }
 
           try {
-              New-MinimalReport -Path "$PWD\output\minimal-v1.rpt" -TextContent "AAAA"
-              New-MinimalReport -Path "$PWD\output\minimal-v2.rpt" -TextContent "BBBB"
-              New-MinimalReport -Path "$PWD\output\minimal-v3.rpt" -TextContent "AAAA" -Italic $true
-              Write-Host "✓ All samples generated"
+              Modify-ReportText -Output "$PWD\output\modified-v1.rpt" -NewText "AAAAAAAA"
+              Modify-ReportText -Output "$PWD\output\modified-v2.rpt" -NewText "BBBBBBBB"
+              Modify-ReportText -Output "$PWD\output\modified-v3.rpt" -NewText "CCCCCCCC"
+              # Aynı template'i değişmeden de kaydet (kontrol için)
+              Copy-Item $template "$PWD\output\template-asis.rpt"
+              Write-Host "✓ All samples ready"
           } catch {
-              Write-Host "::error::Report generation failed: $_"
+              Write-Host "::error::Modification failed: $_"
               Write-Host $_.ScriptStackTrace
               exit 1
           }
