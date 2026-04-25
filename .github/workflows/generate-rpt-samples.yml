@@ -178,7 +178,12 @@ jobs:
           }
 
       - name: Modify-and-save existing RPT (Engine API — daha güvenilir)
-        shell: pwsh
+        # ÖNEMLİ: shell=powershell (Windows PowerShell 5.1, .NET Framework 4.8 host).
+        # CR Engine.dll legacy WebForms tipi (System.Web.UI.ParseChildrenAttribute)
+        # arıyor — pwsh (PowerShell 7 = .NET 8/Core) altında System.Web shim
+        # eksik tipler içeriyor. Windows PowerShell 5.1 .NET Framework 4.x üzerinde
+        # çalıştığı için tüm WebForms namespace'i hazır.
+        shell: powershell
         continue-on-error: true
         run: |
           $dllList = "$env:GITHUB_WORKSPACE\crystal-dll-paths.txt"
