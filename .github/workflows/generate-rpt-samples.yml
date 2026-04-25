@@ -1,26 +1,11 @@
 # GitHub Actions — Windows runner üzerinde Crystal Reports örnek dosya üretimi
 #
-# Kullanımı:
-#   1. Bu dosyayı public bir GitHub repo'suna `.github/workflows/` altına koy
-#   2. Repository'nin Actions sekmesinden "Generate Crystal Report Samples"
-#      workflow'unu manuel çalıştır
-#   3. Run tamamlandıktan sonra "Artifacts" bölümünden rpt-samples.zip indir
-#   4. ZIP'i workspace/rpt-samples/ altına çıkar
-#
-# Ne üretir:
-#   - minimal-v1.rpt: tek text "AAAA"
-#   - minimal-v2.rpt: tek text "BBBB" (sadece metin farkı)
-#   - minimal-v3.rpt: tek text "AAAA" italik
-#   - basic.rpt: 1 text + 1 tarih + 1 sayı alan
-#   - grouped.rpt: 1 grup + detay + toplam
-#
-# Patch Differential Analysis için kritik: v1/v2 tek byte değişikliği ile
-# stream cipher key-stream'i çıkarılabilir.
+# Strateji: Chocolatey ile CR Runtime kur → PowerShell ile rapor oluştur
 
 name: Generate Crystal Report Samples
 
 on:
-  workflow_dispatch:  # Manuel çalıştırma
+  workflow_dispatch:
 
 jobs:
   generate:
@@ -35,54 +20,152 @@ jobs:
         shell: pwsh
         run: New-Item -ItemType Directory -Path output -Force
 
-      - name: Install Crystal Reports Runtime (SAP redistributable)
+      - name: Show available package managers
         shell: pwsh
         run: |
-          # SAP'nin Crystal Reports for VS 2022 redistributable'ı
-          # SP33 (2024) Windows x64 runtime — en güncel stabil
-          $url = "https://origin.softwaredownloads.sap.com/public/file/0020000001590472024"
-          $installer = "$env:TEMP\CRRuntime_64bit.msi"
-          Write-Host "Downloading CR Runtime (hash'li URL kullanıcı tarafından güncellenebilir)..."
-          # Not: SAP download linkleri expire olabilir, manuel kurulum gerekebilir
-          Write-Host "⚠ Eğer download başarısız olursa, manuel kurulum adımları için README'ye bakın"
+          Write-Host "=== Chocolatey ==="
+          choco --version
+          Write-Host "=== Winget ==="
+          winget --version 2>&1
+          Write-Host "=== Existing CR DLLs (GAC) ==="
+          Get-ChildItem "C:\Windows\Microsoft.NET\assembly" -Recurse -Filter "CrystalDecisions*.dll" -ErrorAction SilentlyContinue | Select-Object -First 5 FullName
+          Write-Host "=== NuGet ==="
+          nuget help 2>&1 | Select-Object -First 2
 
-      - name: Create RPT samples via PowerShell + CrystalDecisions API
+      - name: Search Chocolatey for Crystal packages
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          choco search crystal --by-id-only 2>&1 | Select-Object -First 20
+
+      - name: Try installing Crystal Reports Runtime via Chocolatey
+        shell: pwsh
+        continue-on-error: true
+        id: choco_install
+        run: |
+          # Try several known Chocolatey package IDs
+          $packages = @("crystalreports", "crystalreports2008", "crystalreports-runtime", "sap-crystal-reports-for-vs")
+          $installed = $false
+          foreach ($pkg in $packages) {
+            Write-Host "Attempting: choco install $pkg"
+            choco install $pkg -y --no-progress --ignore-checksums 2>&1 | Out-String | Write-Host
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "✓ Installed: $pkg"
+              $installed = $true
+              break
+            }
+          }
+          if (-not $installed) {
+            Write-Host "::warning::No Chocolatey CR package succeeded — will try NuGet next"
+          }
+
+      - name: Try downloading Crystal Reports Runtime MSI directly
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          # Bilinen public mirror URL'leri
+          $urls = @(
+            "https://github.com/majorsilence/CrystalCmd/releases/download/v3.0.0/CRRuntime_64bit_13_0_36.msi",
+            "https://www.crystalreports.com/cr_redists/CRforVS_redist_install_64bit_13_0_36.zip"
+          )
+          foreach ($url in $urls) {
+            try {
+              Write-Host "Trying: $url"
+              $out = "$env:TEMP\cr_runtime"
+              New-Item -ItemType Directory -Path $out -Force | Out-Null
+              $file = Split-Path $url -Leaf
+              Invoke-WebRequest -Uri $url -OutFile "$out\$file" -ErrorAction Stop
+              Write-Host "✓ Downloaded: $file ($((Get-Item "$out\$file").Length) bytes)"
+
+              if ($file -like "*.zip") {
+                Expand-Archive -Path "$out\$file" -DestinationPath $out -Force
+                $msi = Get-ChildItem $out -Filter "*.msi" -Recurse | Select-Object -First 1
+                if ($msi) {
+                  Start-Process msiexec.exe -Wait -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart"
+                  Write-Host "✓ MSI installed"
+                }
+              } elseif ($file -like "*.msi") {
+                Start-Process msiexec.exe -Wait -ArgumentList "/i `"$out\$file`" /qn /norestart"
+                Write-Host "✓ MSI installed"
+              }
+              break
+            } catch {
+              Write-Host "✗ Failed: $($_.Exception.Message)"
+            }
+          }
+
+      - name: Locate Crystal DLLs after install
         shell: pwsh
         run: |
-          # Bu script'in çalışması için CR Runtime kurulu olmalı
-          # CrystalDecisions.ReportAppServer DLL'leri GAC'ta olmalı
+          Write-Host "=== Searching for CrystalDecisions DLLs ==="
+          $found = @()
+          $searchPaths = @(
+            "C:\Program Files (x86)\SAP BusinessObjects",
+            "C:\Program Files\SAP BusinessObjects",
+            "C:\Windows\Microsoft.NET\assembly",
+            "C:\ProgramData\Microsoft\VisualStudio",
+            "C:\Program Files (x86)\Common Files\SAP BusinessObjects"
+          )
+          foreach ($path in $searchPaths) {
+            if (Test-Path $path) {
+              $dlls = Get-ChildItem $path -Recurse -Filter "CrystalDecisions*.dll" -ErrorAction SilentlyContinue
+              foreach ($d in $dlls) { $found += $d.FullName }
+            }
+          }
+          if ($found.Count -gt 0) {
+            Write-Host "Found $($found.Count) CrystalDecisions DLLs:"
+            $found | Select-Object -First 20 | ForEach-Object { Write-Host "  $_" }
+            $found | Out-File "$env:GITHUB_WORKSPACE\crystal-dll-paths.txt"
+          } else {
+            Write-Host "::error::No CrystalDecisions DLLs found after installation attempts"
+            Write-Host "::warning::Cannot proceed with PowerShell report generation"
+          }
 
-          Add-Type -AssemblyName "CrystalDecisions.CrystalReports.Engine"
-          Add-Type -AssemblyName "CrystalDecisions.ReportAppServer.ClientDoc"
-          Add-Type -AssemblyName "CrystalDecisions.ReportAppServer.ReportDefModel"
+      - name: Create RPT samples (only if CR DLLs are available)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $dllList = "$env:GITHUB_WORKSPACE\crystal-dll-paths.txt"
+          if (-not (Test-Path $dllList)) {
+            Write-Host "::warning::No CR DLLs available — skipping RPT generation"
+            exit 0
+          }
+          $dlls = Get-Content $dllList
+          $engineDll = $dlls | Where-Object { $_ -like "*CrystalDecisions.CrystalReports.Engine*" } | Select-Object -First 1
+          $clientDocDll = $dlls | Where-Object { $_ -like "*CrystalDecisions.ReportAppServer.ClientDoc*" } | Select-Object -First 1
+          $reportDefDll = $dlls | Where-Object { $_ -like "*CrystalDecisions.ReportAppServer.ReportDefModel*" } | Select-Object -First 1
+
+          if (-not $engineDll -or -not $clientDocDll) {
+            Write-Host "::error::Required Crystal DLLs missing"
+            exit 1
+          }
+
+          Write-Host "Loading: $engineDll"
+          Add-Type -Path $engineDll
+          Write-Host "Loading: $clientDocDll"
+          Add-Type -Path $clientDocDll
+          if ($reportDefDll) {
+            Write-Host "Loading: $reportDefDll"
+            Add-Type -Path $reportDefDll
+          }
 
           function New-MinimalReport {
               param([string]$Path, [string]$TextContent, [bool]$Italic = $false)
-
               $doc = New-Object CrystalDecisions.ReportAppServer.ClientDoc.ReportClientDocument
               $doc.New()
-
-              # Add text object
-              $objFactory = New-Object CrystalDecisions.ReportAppServer.ReportDefModel.ReportObjectFactory
-              $textObj = $objFactory.CreateTextObject()
+              $textObj = New-Object CrystalDecisions.ReportAppServer.ReportDefModel.TextObject
               $textObj.Text = $TextContent
               $textObj.Left = 100
               $textObj.Top = 100
               $textObj.Width = 2000
               $textObj.Height = 200
-
-              if ($Italic) {
-                  $textObj.FontStyle = [CrystalDecisions.Shared.FontStyle]::Italic
-              }
-
-              # Add to Details section
-              $detailsArea = $doc.ReportDefController.ReportDefinition.Areas["DetailArea"]
+              $detailsArea = $doc.ReportDefController.ReportDefinition.Areas | Where-Object { $_.Name -eq "Detail" } | Select-Object -First 1
+              if (-not $detailsArea) { $detailsArea = $doc.ReportDefController.ReportDefinition.Areas[3] }
               $detailsSection = $detailsArea.Sections[0]
               $doc.ReportDefController.ReportObjectController.Add($textObj, $detailsSection, -1)
-
               $doc.SaveAs($Path, $null, 0)
               $doc.Close()
-              Write-Host "  Created: $Path"
+              Write-Host "  Created: $Path ($((Get-Item $Path).Length) bytes)"
           }
 
           try {
@@ -91,22 +174,48 @@ jobs:
               New-MinimalReport -Path "$PWD\output\minimal-v3.rpt" -TextContent "AAAA" -Italic $true
               Write-Host "✓ All samples generated"
           } catch {
-              Write-Host "✗ Error: $_"
-              Write-Host "Note: Requires Crystal Reports Runtime installed on the runner"
+              Write-Host "::error::Report generation failed: $_"
+              Write-Host $_.ScriptStackTrace
               exit 1
           }
 
-      - name: List generated samples
+      - name: Fallback — copy public sample RPTs from internet
         shell: pwsh
         run: |
-          Write-Host "Generated files:"
-          Get-ChildItem -Path output -Filter *.rpt | ForEach-Object {
-              Write-Host "  $($_.Name) - $($_.Length) bytes"
+          # Eğer CR runtime ile rapor üretemediysek, internet'ten benzer örnek dosyaları çek
+          $count = (Get-ChildItem output -Filter *.rpt -ErrorAction SilentlyContinue | Measure-Object).Count
+          if ($count -gt 0) {
+            Write-Host "Already have $count generated RPTs, no fallback needed"
+            return
+          }
+          Write-Host "::warning::No generated RPTs — fetching public samples instead"
+          $urls = @{
+            "fallback-cmd-thereport.rpt" = "https://raw.githubusercontent.com/majorsilence/CrystalCmd/master/thereport.rpt"
+          }
+          foreach ($name in $urls.Keys) {
+            try {
+              Invoke-WebRequest -Uri $urls[$name] -OutFile "output/$name"
+              Write-Host "✓ Downloaded: $name"
+            } catch {
+              Write-Host "✗ Failed to download $name"
+            }
+          }
+
+      - name: List final samples
+        shell: pwsh
+        run: |
+          Write-Host "Final RPT files in output/:"
+          Get-ChildItem output -Filter *.rpt -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Host "  $($_.Name) - $($_.Length) bytes"
           }
 
       - name: Upload samples as artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: rpt-samples
-          path: output/*.rpt
+          path: |
+            output/*.rpt
+            crystal-dll-paths.txt
           retention-days: 30
+          if-no-files-found: warn
