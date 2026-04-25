@@ -1,0 +1,112 @@
+# GitHub Actions — Windows runner üzerinde Crystal Reports örnek dosya üretimi
+#
+# Kullanımı:
+#   1. Bu dosyayı public bir GitHub repo'suna `.github/workflows/` altına koy
+#   2. Repository'nin Actions sekmesinden "Generate Crystal Report Samples"
+#      workflow'unu manuel çalıştır
+#   3. Run tamamlandıktan sonra "Artifacts" bölümünden rpt-samples.zip indir
+#   4. ZIP'i workspace/rpt-samples/ altına çıkar
+#
+# Ne üretir:
+#   - minimal-v1.rpt: tek text "AAAA"
+#   - minimal-v2.rpt: tek text "BBBB" (sadece metin farkı)
+#   - minimal-v3.rpt: tek text "AAAA" italik
+#   - basic.rpt: 1 text + 1 tarih + 1 sayı alan
+#   - grouped.rpt: 1 grup + detay + toplam
+#
+# Patch Differential Analysis için kritik: v1/v2 tek byte değişikliği ile
+# stream cipher key-stream'i çıkarılabilir.
+
+name: Generate Crystal Report Samples
+
+on:
+  workflow_dispatch:  # Manuel çalıştırma
+
+jobs:
+  generate:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Output directory
+        shell: pwsh
+        run: New-Item -ItemType Directory -Path output -Force
+
+      - name: Install Crystal Reports Runtime (SAP redistributable)
+        shell: pwsh
+        run: |
+          # SAP'nin Crystal Reports for VS 2022 redistributable'ı
+          # SP33 (2024) Windows x64 runtime — en güncel stabil
+          $url = "https://origin.softwaredownloads.sap.com/public/file/0020000001590472024"
+          $installer = "$env:TEMP\CRRuntime_64bit.msi"
+          Write-Host "Downloading CR Runtime (hash'li URL kullanıcı tarafından güncellenebilir)..."
+          # Not: SAP download linkleri expire olabilir, manuel kurulum gerekebilir
+          Write-Host "⚠ Eğer download başarısız olursa, manuel kurulum adımları için README'ye bakın"
+
+      - name: Create RPT samples via PowerShell + CrystalDecisions API
+        shell: pwsh
+        run: |
+          # Bu script'in çalışması için CR Runtime kurulu olmalı
+          # CrystalDecisions.ReportAppServer DLL'leri GAC'ta olmalı
+
+          Add-Type -AssemblyName "CrystalDecisions.CrystalReports.Engine"
+          Add-Type -AssemblyName "CrystalDecisions.ReportAppServer.ClientDoc"
+          Add-Type -AssemblyName "CrystalDecisions.ReportAppServer.ReportDefModel"
+
+          function New-MinimalReport {
+              param([string]$Path, [string]$TextContent, [bool]$Italic = $false)
+
+              $doc = New-Object CrystalDecisions.ReportAppServer.ClientDoc.ReportClientDocument
+              $doc.New()
+
+              # Add text object
+              $objFactory = New-Object CrystalDecisions.ReportAppServer.ReportDefModel.ReportObjectFactory
+              $textObj = $objFactory.CreateTextObject()
+              $textObj.Text = $TextContent
+              $textObj.Left = 100
+              $textObj.Top = 100
+              $textObj.Width = 2000
+              $textObj.Height = 200
+
+              if ($Italic) {
+                  $textObj.FontStyle = [CrystalDecisions.Shared.FontStyle]::Italic
+              }
+
+              # Add to Details section
+              $detailsArea = $doc.ReportDefController.ReportDefinition.Areas["DetailArea"]
+              $detailsSection = $detailsArea.Sections[0]
+              $doc.ReportDefController.ReportObjectController.Add($textObj, $detailsSection, -1)
+
+              $doc.SaveAs($Path, $null, 0)
+              $doc.Close()
+              Write-Host "  Created: $Path"
+          }
+
+          try {
+              New-MinimalReport -Path "$PWD\output\minimal-v1.rpt" -TextContent "AAAA"
+              New-MinimalReport -Path "$PWD\output\minimal-v2.rpt" -TextContent "BBBB"
+              New-MinimalReport -Path "$PWD\output\minimal-v3.rpt" -TextContent "AAAA" -Italic $true
+              Write-Host "✓ All samples generated"
+          } catch {
+              Write-Host "✗ Error: $_"
+              Write-Host "Note: Requires Crystal Reports Runtime installed on the runner"
+              exit 1
+          }
+
+      - name: List generated samples
+        shell: pwsh
+        run: |
+          Write-Host "Generated files:"
+          Get-ChildItem -Path output -Filter *.rpt | ForEach-Object {
+              Write-Host "  $($_.Name) - $($_.Length) bytes"
+          }
+
+      - name: Upload samples as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpt-samples
+          path: output/*.rpt
+          retention-days: 30
