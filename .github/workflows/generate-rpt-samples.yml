@@ -20,6 +20,57 @@ jobs:
         shell: pwsh
         run: New-Item -ItemType Directory -Path output -Force
 
+      - name: Install ASP.NET 4.x feature (required by CrystalReports.Engine -> System.Web)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          # CR 13 Engine.dll, System.Web.UI.ParseChildrenAttribute referansı
+          # taşıyor (legacy ASP.NET WebForms artığı). Windows Server 2022 cloud
+          # runner'da default olarak System.Web.dll yok — Web-Asp-Net45 feature'ı
+          # GAC'a kuruyor.
+          Write-Host "=== Before install: System.Web.dll search ==="
+          Get-ChildItem "C:\Windows\Microsoft.NET\assembly\GAC_MSIL" -Filter "System.Web.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 3 FullName
+          Get-ChildItem "C:\Windows\Microsoft.NET\Framework64\v4.0.30319" -Filter "System.Web.dll" -ErrorAction SilentlyContinue | Select-Object -First 3 FullName
+
+          Write-Host "=== Installing Web-Asp-Net45 (with management tools) ==="
+          try {
+              $result = Install-WindowsFeature -Name Web-Asp-Net45 -IncludeManagementTools -ErrorAction Stop
+              Write-Host "Success: $($result.Success)"
+              Write-Host "RestartNeeded: $($result.RestartNeeded)"
+              Write-Host "ExitCode: $($result.ExitCode)"
+              Write-Host "FeatureResult:"
+              $result.FeatureResult | Format-Table -AutoSize | Out-String | Write-Host
+          } catch {
+              Write-Host "::warning::Install-WindowsFeature failed: $_"
+              Write-Host "=== Falling back to DISM ==="
+              # DISM offline-tarzı alternatif (IIS-ASPNET45 + parent dependencies)
+              $features = @(
+                  "IIS-WebServerRole",
+                  "IIS-WebServer",
+                  "IIS-CommonHttpFeatures",
+                  "IIS-ApplicationDevelopment",
+                  "IIS-NetFxExtensibility45",
+                  "IIS-ISAPIExtensions",
+                  "IIS-ISAPIFilter",
+                  "IIS-ASPNET45"
+              )
+              foreach ($f in $features) {
+                  & dism.exe /Online /Enable-Feature /FeatureName:$f /All /NoRestart 2>&1 | Out-String | Write-Host
+              }
+          }
+
+          Write-Host "=== After install: System.Web.dll search ==="
+          $sysWeb = Get-ChildItem "C:\Windows\Microsoft.NET" -Filter "System.Web.dll" -Recurse -ErrorAction SilentlyContinue
+          if ($sysWeb) {
+              Write-Host "Found $($sysWeb.Count) System.Web.dll files:"
+              $sysWeb | Select-Object -First 10 | ForEach-Object {
+                  $ver = (Get-Item $_.FullName).VersionInfo.FileVersion
+                  Write-Host "  $($_.FullName)  [v$ver]"
+              }
+          } else {
+              Write-Host "::warning::Still no System.Web.dll after install attempt"
+          }
+
       - name: Show available package managers
         shell: pwsh
         run: |
